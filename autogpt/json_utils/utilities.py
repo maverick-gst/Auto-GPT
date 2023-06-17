@@ -1,6 +1,8 @@
 """Utilities for the json_fixes package."""
+import ast
 import json
-import re
+import os.path
+from typing import Any
 
 from jsonschema import Draft7Validator
 
@@ -8,38 +10,50 @@ from autogpt.config import Config
 from autogpt.logs import logger
 
 CFG = Config()
+LLM_DEFAULT_RESPONSE_FORMAT = "llm_response_format_1"
 
 
-def extract_char_position(error_message: str) -> int:
-    """Extract the character position from the JSONDecodeError message.
+def extract_json_from_response(response_content: str) -> dict:
+    # Sometimes the response includes the JSON in a code block with ```
+    if response_content.startswith("```") and response_content.endswith("```"):
+        # Discard the first and last ```, then re-join in case the response naturally included ```
+        response_content = "```".join(response_content.split("```")[1:-1])
 
-    Args:
-        error_message (str): The error message from the JSONDecodeError
-          exception.
-
-    Returns:
-        int: The character position.
-    """
-
-    char_pattern = re.compile(r"\(char (\d+)\)")
-    if match := char_pattern.search(error_message):
-        return int(match[1])
-    else:
-        raise ValueError("Character position not found in the error message.")
+    # response content comes from OpenAI as a Python `str(content_dict)`, literal_eval reverses this
+    try:
+        return ast.literal_eval(response_content)
+    except BaseException as e:
+        logger.error(f"Error parsing JSON response with literal_eval {e}")
+        # TODO: How to raise an error here without causing the program to exit?
+        return {}
 
 
-def validate_json(json_object: object, schema_name: object) -> object:
+def llm_response_schema(
+    schema_name: str = LLM_DEFAULT_RESPONSE_FORMAT,
+) -> dict[str, Any]:
+    filename = os.path.join(os.path.dirname(__file__), f"{schema_name}.json")
+    with open(filename, "r") as f:
+        return json.load(f)
+
+
+def validate_json(
+    json_object: object, schema_name: str = LLM_DEFAULT_RESPONSE_FORMAT
+) -> bool:
     """
     :type schema_name: object
-    :param schema_name:
+    :param schema_name: str
     :type json_object: object
+
+    Returns:
+        bool: Whether the json_object is valid or not
     """
-    with open(f"autogpt/json_utils/{schema_name}.json", "r") as f:
-        schema = json.load(f)
+    schema = llm_response_schema(schema_name)
     validator = Draft7Validator(schema)
 
     if errors := sorted(validator.iter_errors(json_object), key=lambda e: e.path):
-        logger.error("The JSON object is invalid.")
+        for error in errors:
+            logger.error(f"JSON Validation Error: {error}")
+
         if CFG.debug_mode:
             logger.error(
                 json.dumps(json_object, indent=4)
@@ -48,7 +62,8 @@ def validate_json(json_object: object, schema_name: object) -> object:
 
             for error in errors:
                 logger.error(f"Error: {error.message}")
-    elif CFG.debug_mode:
-        print("The JSON object is valid.")
+        return False
 
-    return json_object
+    logger.debug("The JSON object is valid.")
+
+    return True
