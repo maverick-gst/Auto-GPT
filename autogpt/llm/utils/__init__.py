@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import List, Literal, Optional
 
 from colorama import Fore
@@ -8,8 +9,13 @@ from autogpt.config import Config
 from autogpt.logs import logger
 
 from ..api_manager import ApiManager
-from ..base import ChatSequence, Message
+from ..base import ChatModelResponse, ChatSequence, Message
 from ..providers import openai as iopenai
+from ..providers.openai import (
+    OPEN_AI_CHAT_MODELS,
+    OpenAIFunctionCall,
+    OpenAIFunctionSpec,
+)
 from .token_counter import *
 
 
@@ -52,23 +58,23 @@ def call_ai_function(
             Message("user", arg_str),
         ],
     )
-    return create_chat_completion(prompt=prompt, temperature=0)
+    return create_chat_completion(prompt=prompt, temperature=0, config=config).content
 
 
 def create_text_completion(
     prompt: str,
+    config: Config,
     model: Optional[str],
     temperature: Optional[float],
     max_output_tokens: Optional[int],
 ) -> str:
-    cfg = Config()
     if model is None:
-        model = cfg.fast_llm_model
+        model = config.fast_llm_model
     if temperature is None:
-        temperature = cfg.temperature
+        temperature = config.temperature
 
-    if cfg.use_azure:
-        kwargs = {"deployment_id": cfg.get_azure_deployment_id_for_model(model)}
+    if config.use_azure:
+        kwargs = {"deployment_id": config.get_azure_deployment_id_for_model(model)}
     else:
         kwargs = {"model": model}
 
@@ -77,7 +83,7 @@ def create_text_completion(
         **kwargs,
         temperature=temperature,
         max_tokens=max_output_tokens,
-        api_key=cfg.openai_api_key,
+        api_key=config.openai_api_key,
     )
     logger.debug(f"Response: {response}")
 
@@ -87,10 +93,12 @@ def create_text_completion(
 # Overly simple abstraction until we create something better
 def create_chat_completion(
     prompt: ChatSequence,
+    config: Config,
+    functions: Optional[List[OpenAIFunctionSpec]] = None,
     model: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
-) -> str:
+) -> ChatModelResponse:
     """Create a chat completion using the OpenAI API
 
     Args:
@@ -102,11 +110,13 @@ def create_chat_completion(
     Returns:
         str: The response from the chat completion
     """
-    cfg = Config()
+
     if model is None:
         model = prompt.model.name
     if temperature is None:
-        temperature = cfg.temperature
+        temperature = config.temperature
+    if max_tokens is None:
+        max_tokens = OPEN_AI_CHAT_MODELS[model].max_tokens - prompt.token_length
 
     logger.debug(
         f"{Fore.GREEN}Creating chat completion with model {model}, temperature {temperature}, max_tokens {max_tokens}{Fore.RESET}"
@@ -117,7 +127,7 @@ def create_chat_completion(
         "max_tokens": max_tokens,
     }
 
-    for plugin in cfg.plugins:
+    for plugin in config.plugins:
         if plugin.can_handle_chat_completion(
             messages=prompt.raw(),
             **chat_completion_kwargs,
@@ -129,11 +139,16 @@ def create_chat_completion(
             if message is not None:
                 return message
 
-    chat_completion_kwargs["api_key"] = cfg.openai_api_key
-    if cfg.use_azure:
-        chat_completion_kwargs["deployment_id"] = cfg.get_azure_deployment_id_for_model(
-            model
-        )
+    chat_completion_kwargs["api_key"] = config.openai_api_key
+    if config.use_azure:
+        chat_completion_kwargs[
+            "deployment_id"
+        ] = config.get_azure_deployment_id_for_model(model)
+    if functions:
+        chat_completion_kwargs["functions"] = [
+            function.__dict__ for function in functions
+        ]
+        logger.debug(f"Function dicts: {chat_completion_kwargs['functions']}")
 
     response = iopenai.create_chat_completion(
         messages=prompt.raw(),
@@ -141,19 +156,24 @@ def create_chat_completion(
     )
     logger.debug(f"Response: {response}")
 
-    resp = ""
-    if not hasattr(response, "error"):
-        resp = response.choices[0].message["content"]
-    else:
+    if hasattr(response, "error"):
         logger.error(response.error)
         raise RuntimeError(response.error)
 
-    for plugin in cfg.plugins:
+    first_message = response.choices[0].message
+    content: str | None = first_message.get("content")
+    function_call: OpenAIFunctionCall | None = first_message.get("function_call")
+
+    for plugin in config.plugins:
         if not plugin.can_handle_on_response():
             continue
-        resp = plugin.on_response(resp)
+        content = plugin.on_response(content)
 
-    return resp
+    return ChatModelResponse(
+        model_info=OPEN_AI_CHAT_MODELS[model],
+        content=content,
+        function_call=function_call,
+    )
 
 
 def check_model(

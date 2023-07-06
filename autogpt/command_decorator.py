@@ -1,39 +1,43 @@
 import functools
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypedDict
 
 from autogpt.config import Config
-from autogpt.logs import logger
-from autogpt.models.command import Command
+from autogpt.models.command import Command, CommandParameter
 
 # Unique identifier for auto-gpt commands
 AUTO_GPT_COMMAND_IDENTIFIER = "auto_gpt_command"
 
 
+class CommandParameterSpec(TypedDict):
+    type: str
+    description: str
+    required: bool
+
+
 def command(
     name: str,
     description: str,
-    signature: str,
+    parameters: dict[str, CommandParameterSpec],
     enabled: bool | Callable[[Config], bool] = True,
     disabled_reason: Optional[str] = None,
 ) -> Callable[..., Any]:
     """The command decorator is used to create Command objects from ordinary functions."""
 
-    # TODO: Remove this in favor of better command management
-    CFG = Config()
-
-    if callable(enabled):
-        enabled = enabled(CFG)
-    if not enabled:
-        if disabled_reason is not None:
-            logger.debug(f"Command '{name}' is disabled: {disabled_reason}")
-        return lambda func: func
-
     def decorator(func: Callable[..., Any]) -> Command:
+        typed_parameters = [
+            CommandParameter(
+                name=param_name,
+                description=parameter.get("description"),
+                type=parameter.get("type", "string"),
+                required=parameter.get("required", False),
+            )
+            for param_name, parameter in parameters.items()
+        ]
         cmd = Command(
             name=name,
             description=description,
             method=func,
-            signature=signature,
+            parameters=typed_parameters,
             enabled=enabled,
             disabled_reason=disabled_reason,
         )
